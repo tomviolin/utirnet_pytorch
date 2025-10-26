@@ -27,6 +27,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 
+from torch.utils.tensorboard import SummaryWriter
+
+
 # -----------------------------
 # ========= PARAMETERS ========
 # -----------------------------
@@ -36,11 +39,11 @@ lambda_um = 0.405  # wavelength in um (405 nm)
 dx = 2.4           # sampling/pixel size in object plane (um)
 
 # dataset / image params
-IMG_SIZE = 128     # target size for images (512x512)
+IMG_SIZE = 512     # target size for images (512x512)
 #TRAIN_N = 650      # number of train images
 #VAL_N = 50         # validation images
-TRAIN_N = 60      # number of train images
-VAL_N = 9         # validation images
+TRAIN_N = 6      # number of train images
+VAL_N =  3        # validation images
 
 # path to dataset (flowers dataset expected to have subfolders)
 # change this to your local path
@@ -53,10 +56,10 @@ VAL_CLASS_INDICES = [2, 3]
 # training params
 BATCH_SIZE = 1
 #EPOCHS = 30
-EPOCHS = 4
+EPOCHS = 8
 LR = 1e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+print("***Using device:", DEVICE)
 # save paths
 # YYMMDD_HHMMSS formatted now string
 timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M%S")
@@ -64,6 +67,10 @@ OUT_DIR_DATED = "UTIRnet_output_"+timestamp
 os.makedirs(OUT_DIR_DATED, exist_ok=True)
 OUT_DIR_DUMP = "UTIRnet_output"
 os.makedirs(OUT_DIR_DUMP, exist_ok=True)
+
+# TensorBoard writer
+writer = SummaryWriter(log_dir=".")
+os.system("tensorboard --logdir . &")
 
 # -----------------------------
 # ==== Utility / Optics code ==
@@ -309,7 +316,9 @@ def train_once(model, train_loader, val_loader, epochs=EPOCHS, lr=LR, device=DEV
     for ep in range(epochs):
         model.train()
         tloss = 0.0
+        train_count = 0
         for xb, yb in train_loader:
+            train_count += 1
             xb = xb.to(device)
             yb = yb.to(device)
             optimizer.zero_grad()
@@ -318,23 +327,30 @@ def train_once(model, train_loader, val_loader, epochs=EPOCHS, lr=LR, device=DEV
             loss.backward()
             optimizer.step()
             tloss += loss.item()
-            print(f"    [Batch] loss={loss.item():.6f}")
+            print(f"[Ep {ep+1}/{epochs}] [{train_count}/{len(train_loader)}] [Batch] batch_loss={loss.item():.6f} tloss={tloss:.6f}")
+
         tloss /= len(train_loader)
 
         # validation
         model.eval()
         vloss = 0.0
+        val_count = 0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb = xb.to(device)
                 yb = yb.to(device)
                 out = model(xb)
                 vloss += criterion(out, yb).item()
+                print(f"[Ep {ep+1}/{epochs}] [{val_count+1}/{len(val_loader)}] [Val Batch] batch_vloss={criterion(out, yb).item():.6f}")
+                val_count += 1
         vloss /= len(val_loader)
 
         scheduler.step()
         history['train_loss'].append(tloss)
         history['val_loss'].append(vloss)
+        writer.add_scalar('Loss/Train', tloss, ep+1)
+        writer.add_scalar('Loss/Val', vloss, ep+1)
+        writer.flush()
         print(f"[Epoch {ep+1}/{epochs}] train={tloss:.6f} val={vloss:.6f}")
 
     return history
@@ -407,7 +423,8 @@ def main():
     # Generate / load dataset
     # ---------------------
     if not os.path.exists(os.path.join(OUT_DIR_DUMP, "train_dataset.npz")) or \
-            "--regenerate-dataset" in sys.argv:
+            "--regenerate-dataset" in sys.argv or \
+            '--clean' in sys.argv:
         print("Generating datasets (this may take a while)...")
         # You can also create and save dataset to disk once and load later to avoid regenerating each run.
         inTrAmp, tarTrAmp, holosTrAmp = GenerateDataset(DATASET_PATH, TRAIN_CLASS_INDICES, TRAIN_N, Z, lambda_um, dx, mode='amp')
@@ -432,7 +449,8 @@ def main():
         holosTrPhs = data['holosTrPhs']
 
     if not os.path.exists(os.path.join(OUT_DIR_DUMP, "val_dataset.npz")) or \
-            "--regenerate-dataset" in sys.argv:
+            "--regenerate-dataset" in sys.argv or \
+            '--clean' in sys.argv:
 
         inValAmp, tarValAmp, holosValAmp = GenerateDataset(DATASET_PATH, VAL_CLASS_INDICES, VAL_N, Z, lambda_um, dx, mode='amp')
         inValPhs, tarValPhs, holosValPhs = GenerateDataset(DATASET_PATH, VAL_CLASS_INDICES, VAL_N, Z, lambda_um, dx, mode='phs')
@@ -486,7 +504,9 @@ def main():
     # -----------------------------
 
     pretrained_A_path = os.path.join(OUT_DIR_DUMP, "CNN_A_state.pth")
-    if os.path.exists(pretrained_A_path) and not "--retrain" in sys.argv:
+    if os.path.exists(pretrained_A_path) and not "--retrain" in sys.argv and \
+            not '--clean' in sys.argv:
+            
         print("Loading pretrained CNN_A weights...")
         srcdir = open(os.path.join(OUT_DIR_DUMP, "last_output_dir.txt"), "r").read().strip()
         os.symlink(os.path.join('../'+srcdir, "CNN_A_state.pth"), os.path.join(OUT_DIR_DATED, "CNN_A_state.pth"))
@@ -505,7 +525,8 @@ def main():
     # load CNN_P pretrained weights if available
     # -----------------------------
     pretrained_P_path = os.path.join(OUT_DIR_DUMP, "CNN_P_state.pth")
-    if os.path.exists(pretrained_P_path) and not "--retrain" in sys.argv:
+    if os.path.exists(pretrained_P_path) and not "--retrain" in sys.argv and \
+            not '--clean' in sys.argv:
         print("Loading pretrained CNN_P weights...")
         srcdir = open(os.path.join(OUT_DIR_DUMP, "last_output_dir.txt"), "r").read().strip()
         os.symlink(os.path.join('../'+srcdir, "CNN_P_state.pth"), os.path.join(OUT_DIR_DATED, "CNN_P_state.pth"))
@@ -551,7 +572,7 @@ def main():
             ap_name = "phase"
 
         # pad hologram like MATLAB does:
-        pad = 256
+        pad = IMG_SIZE // 4 
         holoP = np.pad(holo, ((pad, pad), (pad, pad)), mode="edge")
 
         # Reconstruction
@@ -569,32 +590,40 @@ def main():
             rng = (0.0, 1.1)
             plt.subplot(1, 3, 1)
             plt.imshow(np.abs(Uout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("input AS amplitude (with twin-image)")
+            writer.add_figure(f'Reconstruction/Input_{ap_name}', plt.gcf(), global_step=0)
             plt.axis("off")
-            plt.colorbar()
+            #plt.colorbar()
             plt.subplot(1, 3, 2)
             plt.imshow(np.abs(Yout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("UTIRnet amplitude reconstruction")
+            writer.add_figure(f'Reconstruction/UTIRnet_{ap_name}', plt.gcf(), global_step=0)
             plt.axis("off")
-            plt.colorbar()
+            #plt.colorbar()
             plt.subplot(1, 3, 3)
             plt.imshow(GT, cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("Ground truth amplitude")
+            writer.add_figure(f'Reconstruction/GroundTruth_{ap_name}', plt.gcf(), global_step=0)
             plt.axis("off")
-            plt.colorbar()
+            #plt.colorbar()
         else:
             rng = (-math.pi, math.pi)
             plt.subplot(1, 3, 1)
             plt.imshow(np.angle(Uout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("input AS phase (with twin-image)")
+            writer.add_figure(f'Reconstruction/Input_{ap_name}', plt.gcf(), global_step=0)
             plt.axis("off")
-            plt.colorbar()
+            #plt.colorbar()
             plt.subplot(1, 3, 2)
             plt.imshow(np.angle(Yout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("UTIRnet reconstruction")
+            writer.add_figure(f'Reconstruction/UTIRnet_{ap_name}', plt.gcf(), global_step=0)
             plt.axis("off")
-            plt.colorbar()
+            #plt.colorbar()
             plt.subplot(1, 3, 3)
             plt.imshow(GT - math.pi, cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("Ground truth (shifted)")
+            writer.add_figure(f'Reconstruction/GroundTruth_{ap_name}', plt.gcf(), global_step=0)
             plt.axis("off")
-            plt.colorbar()
+            #plt.colorbar()
         plt.tight_layout()
         plt.savefig(os.path.join(OUT_DIR_DATED, f"UTIRnet_{ap_name}_reconstruction_example.png"), dpi=300)
+        writer.add_figure(f'Reconstruction/{ap_name}', plt.gcf(), global_step=0)
+        writer.flush()
         plt.show()
 
 
