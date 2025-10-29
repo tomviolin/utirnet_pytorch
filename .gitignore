@@ -9,6 +9,6 @@ xxx.*
 *.old
 *~
 events.out*
-
-
+*.jpg
+*.png
 

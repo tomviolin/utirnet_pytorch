@@ -39,11 +39,11 @@ lambda_um = 0.405  # wavelength in um (405 nm)
 dx = 2.4           # sampling/pixel size in object plane (um)
 
 # dataset / image params
-IMG_SIZE = 512     # target size for images (512x512)
-#TRAIN_N = 650      # number of train images
-#VAL_N = 50         # validation images
-TRAIN_N = 6      # number of train images
-VAL_N =  3        # validation images
+IMG_SIZE = 512    # target size for images (512x512)
+TRAIN_N = 650      # number of train images
+VAL_N = 60        # validation images
+#TRAIN_N = 2      # number of train images
+#VAL_N =  1        # validation images
 
 # path to dataset (flowers dataset expected to have subfolders)
 # change this to your local path
@@ -56,9 +56,12 @@ VAL_CLASS_INDICES = [2, 3]
 # training params
 BATCH_SIZE = 1
 #EPOCHS = 30
-EPOCHS = 8
+EPOCHS = 55
 LR = 1e-4
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if "--cpu" in sys.argv:
+    DEVICE = "cpu"
+else:
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("***Using device:", DEVICE)
 # save paths
 # YYMMDD_HHMMSS formatted now string
@@ -70,7 +73,7 @@ os.makedirs(OUT_DIR_DUMP, exist_ok=True)
 
 # TensorBoard writer
 writer = SummaryWriter(log_dir=".")
-os.system("tensorboard --logdir . &")
+#os.system("tensorboard --logdir . &")
 
 # -----------------------------
 # ==== Utility / Optics code ==
@@ -80,7 +83,9 @@ def _to_float_img(im, size=IMG_SIZE):
     if isinstance(im, Image.Image):
         im = im.convert("L")
         im = im.resize((size, size), Image.BICUBIC)
-        arr = np.asarray(im, dtype=np.float32) / 255.0
+        arr = np.asarray(im, dtype=np.float32)  / 255.0
+        #arr -= arr.min()
+        #arr = arr / arr.max()
     else:
         # assume numpy
         arr = np.asarray(im, dtype=np.float32)
@@ -88,6 +93,8 @@ def _to_float_img(im, size=IMG_SIZE):
             arr = arr.mean(axis=2)
         arr = Image.fromarray((arr * 255).astype(np.uint8)).resize((size, size), Image.BICUBIC)
         arr = np.asarray(arr, dtype=np.float32) / 255.0
+        #arr -= arr.min()
+        #arr = arr / arr.max()
     return arr
 
 
@@ -189,7 +196,7 @@ def _list_class_images(root, class_indices):
     return picked
 
 
-def GenerateDataset(path, class_indices, n_images, Z_um, wavelength_um, dx_um, mode="amp"):
+def GenerateDataset(path, class_indices, n_images, Z_um, wavelength_um, dx_um, mode="amp",validate=False):
     """
     Create dataset of n_images from images inside class directories in path.
     Returns numpy arrays:
@@ -198,6 +205,7 @@ def GenerateDataset(path, class_indices, n_images, Z_um, wavelength_um, dx_um, m
       holos: (n, H, W) float32 -> hologram intensity
     NOTE: generating dataset is time-consuming; consider saving to disk after generation.
     """
+    np.random.seed(0)
     file_list = _list_class_images(path, class_indices)
     if len(file_list) == 0:
         raise RuntimeError(f"No images found in {path} for classes {class_indices}")
@@ -208,7 +216,12 @@ def GenerateDataset(path, class_indices, n_images, Z_um, wavelength_um, dx_um, m
 
     for i in tqdm(range(n_images), desc=f"GenerateDataset({mode})"):
         f = random.choice(file_list)
-        img = Image.open(f)
+        if (np.random.rand() < .0 and not validate):
+            # random dots pattern
+            img = Image.fromarray((np.random.rand(IMG_SIZE, IMG_SIZE) > 0.7).astype(np.float32))
+        else:
+            img = Image.open(f)
+
         Uin, GT, holo = GenerateHologram(img, Z_um, wavelength_um, dx_um, mode=mode)
 
         # prepare network inputs (amplitude or phase derived from Uin)
@@ -404,7 +417,9 @@ def UTIRnetReconstruction(holo, CNN_A, CNN_P, Z_um, wavelength_um, dx_um, m1=Non
     # if amplitude network was trained with normalized amplitude, rescale
     # Here we assume target amplitudes were 0..1 (so direct)
     Yamp = Yamp_pred.astype(np.float32)
-    Yphs = Yphs_pred.astype(np.float32)
+    Yamp -= Yamp.min()
+    #Yamp = Yamp / Yamp.max() # * m  # rescale to original max amplitude
+    Yphs = Yphs_pred.astype(np.float32) / 255.0
 
     Yout = Yamp * np.exp(1j * Yphs)
 
@@ -452,8 +467,8 @@ def main():
             "--regenerate-dataset" in sys.argv or \
             '--clean' in sys.argv:
 
-        inValAmp, tarValAmp, holosValAmp = GenerateDataset(DATASET_PATH, VAL_CLASS_INDICES, VAL_N, Z, lambda_um, dx, mode='amp')
-        inValPhs, tarValPhs, holosValPhs = GenerateDataset(DATASET_PATH, VAL_CLASS_INDICES, VAL_N, Z, lambda_um, dx, mode='phs')
+        inValAmp, tarValAmp, holosValAmp = GenerateDataset(DATASET_PATH, VAL_CLASS_INDICES, VAL_N, Z, lambda_um, dx, mode='amp', validate=True)
+        inValPhs, tarValPhs, holosValPhs = GenerateDataset(DATASET_PATH, VAL_CLASS_INDICES, VAL_N, Z, lambda_um, dx, mode='phs', validate=True)
 
         np.savez_compressed(os.path.join(OUT_DIR_DUMP, "val_dataset.npz"),
             inValAmp=inValAmp, tarValAmp=tarValAmp, holosValAmp=holosValAmp,
@@ -511,7 +526,8 @@ def main():
         srcdir = open(os.path.join(OUT_DIR_DUMP, "last_output_dir.txt"), "r").read().strip()
         os.symlink(os.path.join('../'+srcdir, "CNN_A_state.pth"), os.path.join(OUT_DIR_DATED, "CNN_A_state.pth"))
         info_A = CNN_A.load_state_dict(torch.load(pretrained_A_path, map_location=DEVICE))
-    else:
+
+    if "--continue-train" in sys.argv:
         # ---------------------
         # Train CNN_A
         # ---------------------
@@ -531,7 +547,9 @@ def main():
         srcdir = open(os.path.join(OUT_DIR_DUMP, "last_output_dir.txt"), "r").read().strip()
         os.symlink(os.path.join('../'+srcdir, "CNN_P_state.pth"), os.path.join(OUT_DIR_DATED, "CNN_P_state.pth"))
         info_P = CNN_P.load_state_dict(torch.load(pretrained_P_path, map_location=DEVICE))
-    else:
+    
+    if "--continue-train" in sys.argv:
+
         # ---------------------
         # Train CNN_P
         # ---------------------
@@ -556,6 +574,39 @@ def main():
     shutil.copyfile(os.path.join(OUT_DIR_DATED, f"UTIRnet_meta_Z-{Z/1000:.2f}mm_dx-{dx}_lambda-{int(lambda_um*1000)}nm.mat"),
             os.path.join(OUT_DIR_DUMP, f"UTIRnet_meta_Z-{Z/1000:.2f}mm_dx-{dx}_lambda-{int(lambda_um*1000)}nm.mat"))
     print(f"{OUT_DIR_DATED}",file=open(os.path.join(OUT_DIR_DUMP, "last_output_dir.txt"), "w")) 
+
+
+    # reconstruct hologram file passed as argument
+    #holo_file = "../flewers/type1/HOLO-gt.png"
+    holo_file = "../flowers/rose/10090824183_d02c613f10_m.jpg"
+    holo = _to_float_img(Image.open(holo_file), size=IMG_SIZE)
+    plt.imshow(holo, cmap="gray")
+    plt.savefig("junk.png", dpi=300)
+
+    Yout, Yamp, Yphs, Uout = UTIRnetReconstruction(holo, CNN_A, CNN_P, Z, lambda_um, dx, m1=None, show_debug=1)
+    plt.figure(figsize=(12,6))
+    plt.subplot(1,3,1)
+    plt.imshow(np.abs(Uout), cmap="gray", vmin=0, vmax=1.1)
+    plt.title("Input AS amplitude (with twin-image)")
+    plt.axis("off") 
+    plt.subplot(1,3,2)
+    plt.imshow(np.abs(Yout), cmap="gray", vmin=0, vmax=1.1)
+    plt.title("UTIRnet amplitude reconstruction")
+    plt.axis("off")
+    plt.subplot(1,3,3)
+    plt.imshow(np.angle(Yout), cmap="gray", vmin=-math.pi, vmax=math.pi)
+    plt.title("UTIRnet phase reconstruction")
+    plt.axis("off") 
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR_DATED, f"UTIRnet_{timestamp}_holotest_reconstruction.png"), dpi=300)
+    plt.show()
+
+
+    exit(0)
+
+
+
     # ---------------------
     # Example: reconstruct one validation hologram (index 1)
     # ---------------------
@@ -572,7 +623,7 @@ def main():
             ap_name = "phase"
 
         # pad hologram like MATLAB does:
-        pad = IMG_SIZE // 4 
+        pad = 4 #IMG_SIZE // 4 
         holoP = np.pad(holo, ((pad, pad), (pad, pad)), mode="edge")
 
         # Reconstruction
@@ -585,45 +636,49 @@ def main():
         Yphs = Yphs[pad:-pad, pad:-pad]
 
         # visualize like in MATLAB
-        plt.figure(figsize=(14, 8))
+        #plt.figure(figsize=(10, 8))
+
+        fig,axs = plt.subplots(1, 3, figsize=(15,5))
         if AmpPhs == 1:
             rng = (0.0, 1.1)
-            plt.subplot(1, 3, 1)
-            plt.imshow(np.abs(Uout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("input AS amplitude (with twin-image)")
-            writer.add_figure(f'Reconstruction/Input_{ap_name}', plt.gcf(), global_step=0)
-            plt.axis("off")
-            #plt.colorbar()
-            plt.subplot(1, 3, 2)
-            plt.imshow(np.abs(Yout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("UTIRnet amplitude reconstruction")
-            writer.add_figure(f'Reconstruction/UTIRnet_{ap_name}', plt.gcf(), global_step=0)
-            plt.axis("off")
-            #plt.colorbar()
-            plt.subplot(1, 3, 3)
-            plt.imshow(GT, cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("Ground truth amplitude")
-            writer.add_figure(f'Reconstruction/GroundTruth_{ap_name}', plt.gcf(), global_step=0)
-            plt.axis("off")
-            #plt.colorbar()
+            #plt.subplot(1, 3, 1)
+
+            im = axs[0].imshow(np.abs(Uout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("input AS amplitude (with twin-image)")
+            fig.colorbar(im,ax=axs[0])
+            #writer.add_figure(f'Reconstruction/Input_{ap_name}', plt.gcf(), global_step=0)
+            #plt.axis("off")
+            #plt.subplot(1, 3, 2)
+            im = axs[1].imshow(np.abs(Yout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("UTIRnet amplitude reconstruction")
+            fig.colorbar(im,ax=axs[1])
+            #writer.add_figure(f'Reconstruction/UTIRnet_{ap_name}', plt.gcf(), global_step=0)
+            #plt.axis("off")
+            #plt.subplot(1, 3, 3)
+            im = axs[2].imshow(GT, cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("Ground truth amplitude")
+            fig.colorbar(im,ax=axs[2])
+            #writer.add_figure(f'Reconstruction/GroundTruth_{ap_name}', plt.gcf(), global_step=0)
+            #plt.axis("off")
         else:
             rng = (-math.pi, math.pi)
-            plt.subplot(1, 3, 1)
-            plt.imshow(np.angle(Uout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("input AS phase (with twin-image)")
-            writer.add_figure(f'Reconstruction/Input_{ap_name}', plt.gcf(), global_step=0)
-            plt.axis("off")
-            #plt.colorbar()
-            plt.subplot(1, 3, 2)
-            plt.imshow(np.angle(Yout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("UTIRnet reconstruction")
-            writer.add_figure(f'Reconstruction/UTIRnet_{ap_name}', plt.gcf(), global_step=0)
-            plt.axis("off")
-            #plt.colorbar()
-            plt.subplot(1, 3, 3)
-            plt.imshow(GT - math.pi, cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("Ground truth (shifted)")
-            writer.add_figure(f'Reconstruction/GroundTruth_{ap_name}', plt.gcf(), global_step=0)
-            plt.axis("off")
-            #plt.colorbar()
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUT_DIR_DATED, f"UTIRnet_{ap_name}_reconstruction_example.png"), dpi=300)
-        writer.add_figure(f'Reconstruction/{ap_name}', plt.gcf(), global_step=0)
-        writer.flush()
+            #plt.subplot(1, 3, 1)
+            im = axs[0].imshow(np.angle(Uout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("input AS phase (with twin-image)")
+            fig.colorbar(im,ax=axs[0])
+            #writer.add_figure(f'Reconstruction/Input_{ap_name}', plt.gcf(), global_step=0)
+            #plt.axis("off")
+            #plt.subplot(1, 3, 2)
+            im = axs[1].imshow(np.angle(Yout), cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("UTIRnet reconstruction")
+            fig.colorbar(im,ax=axs[1])
+            #writer.add_figure(f'Reconstruction/UTIRnet_{ap_name}', plt.gcf(), global_step=0)
+            #plt.axis("off")
+            #plt.subplot(1, 3, 3)
+            im = axs[2].imshow(GT - math.pi, cmap="gray", vmin=rng[0], vmax=rng[1]); plt.title("Ground truth (shifted)")
+            fig.colorbar(im,ax=axs[2])
+            #writer.add_figure(f'Reconstruction/GroundTruth_{ap_name}', plt.gcf(), global_step=0)
+            #plt.axis("off")
+        #plt.tight_layout()
+        #writer.add_figure(f'Reconstruction/{ap_name}', plt.gcf(), global_step=0)
+        #writer.flush()
+        plt.savefig(os.path.join(OUT_DIR_DATED, f"UTIRnet_{timestamp}_{ap_name}_reconstruction_example.png"), dpi=300)
+        plt.close('all')
         plt.show()
 
 
